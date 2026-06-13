@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+
+# SwiftPM（Package.resolved 保留提交以锁定依赖版本）
+.swiftpm/
+
+# AI / 编辑器工具（个人本地配置，不入库）
+.ace-tool/
+.serena/
+.superset/
+.gemini-clipboard/
+.claude/
+.idea/
+.vscode/
+
+# Finder 拖拽误复制的目录（形如 "InputLock 2026-06-13 17-26-51"）
+**/InputLock 20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]*/
+
+# 临时与日志
+*.log

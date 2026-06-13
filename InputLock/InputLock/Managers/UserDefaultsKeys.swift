@@ -1,0 +1,15 @@
+enum UserDefaultsKeys {
+    static let isLocked = "isLocked"
+    static let lockedInputSourceID = "lockedInputSourceID"
+    static let preferredLanguage = "preferredLanguage"
+    static let launchAtLogin = "launchAtLogin"
+    static let customInputSwitchHotkeys = "customInputSwitchHotkeys"
+    static let hideDockIcon = "hideDockIcon"
+    static let clipboardRetentionDays = "clipboardRetentionDays"
+    static let clipboardMaxEntries = "clipboardMaxEntries"
+    static let clipboardHotkeyKeyCode = "clipboardHotkeyKeyCode"
+    static let clipboardHotkeyModifiers = "clipboardHotkeyModifiers"
+    static let clipboardWindowFrame = "clipboardWindowFrame"
+    static let clipboardFeatureEnabled = "clipboardFeatureEnabled"
+    static let scratchpadContent = "scratchpadContent"
+}
