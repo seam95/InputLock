@@ -12,9 +12,14 @@ struct ClipboardHistoryView: View {
     let pasteTargetPIDProvider: () -> pid_t?
 
     @State private var keyEventMonitor: Any?
-    @State private var hoveredEntryID: UUID?
     @State private var loadedEntryCount: Int = 15
     @State private var selectionChangeSource: SelectionChangeSource = .programmatic
+
+    // 派生数据缓存：避免每次 body 重算都重新过滤/分组（hover、选中变化等都会触发 body 重算）
+    @State private var filteredCache: [ClipboardEntry]?
+    @State private var visibleCache: [ClipboardEntry]?
+    @State private var groupedCache: [(titleKey: String, entries: [ClipboardEntry])]?
+    @State private var displayedCache: [ClipboardEntry]?
     @FocusState private var isSearchFocused: Bool
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorScheme) private var colorScheme
@@ -89,19 +94,23 @@ struct ClipboardHistoryView: View {
     private static let loadMoreTriggerDistance = 5
 
     private var filteredEntries: [ClipboardEntry] {
-        uiState.filteredEntries(from: history.entries)
+        if let filteredCache { return filteredCache }
+        return uiState.filteredEntries(from: history.entries)
     }
 
     private var visibleEntries: [ClipboardEntry] {
-        Array(filteredEntries.prefix(loadedEntryCount))
+        if let visibleCache { return visibleCache }
+        return Array(filteredEntries.prefix(loadedEntryCount))
     }
 
     private var groupedEntries: [(titleKey: String, entries: [ClipboardEntry])] {
-        groupedEntries(from: visibleEntries)
+        if let groupedCache { return groupedCache }
+        return groupedEntries(from: visibleEntries)
     }
 
     private var displayedEntries: [ClipboardEntry] {
-        groupedEntries.flatMap { $0.entries }
+        if let displayedCache { return displayedCache }
+        return groupedEntries.flatMap { $0.entries }
     }
 
     private func groupedEntries(from entries: [ClipboardEntry]) -> [(titleKey: String, entries: [ClipboardEntry])] {
@@ -172,18 +181,24 @@ struct ClipboardHistoryView: View {
             footer
         }
         .onAppear {
-            ensureSelectedEntryVisibleInLoadedEntries()
-            updateSelectionIfNeeded()
+            rebuildDerivedState()
             startKeyMonitor()
             focusSearchField()
         }
         .onDisappear {
             stopKeyMonitor()
         }
-        .onChange(of: filteredEntries) { _, _ in
-            clampVisibleEntriesToFilteredCount()
-            ensureSelectedEntryVisibleInLoadedEntries()
-            updateSelectionIfNeeded()
+        .onChange(of: history.entries) { _, _ in
+            rebuildDerivedState()
+        }
+        .onChange(of: uiState.searchText) { _, _ in
+            rebuildDerivedState()
+        }
+        .onChange(of: uiState.filter) { _, _ in
+            rebuildDerivedState()
+        }
+        .onChange(of: loadedEntryCount) { _, _ in
+            rebuildVisibleAndGroupedOnly()
         }
         .onChange(of: uiState.searchFocusToken) { _, _ in
             focusSearchField()
@@ -327,11 +342,22 @@ struct ClipboardHistoryView: View {
                     ForEach(groupedEntries, id: \.titleKey) { group in
                         Section {
                             ForEach(group.entries) { entry in
-                                historyRow(entry)
-                                    .id(entry.id)
-                                    .onAppear {
+                                ClipboardHistoryRow(
+                                    entry: entry,
+                                    isSelected: uiState.selectedEntryID == entry.id,
+                                    pasteActionTitle: language.localized("clipboard.action.paste"),
+                                    onTap: {
+                                        selectionChangeSource = .pointer
+                                        uiState.selectedEntryID = entry.id
+                                    },
+                                    onPaste: {
+                                        pasteEntry(entry)
+                                    },
+                                    onAppear: {
                                         loadMoreIfNeeded(currentEntry: entry)
                                     }
+                                )
+                                .id(entry.id)
                             }
                         } header: {
                             sectionHeader(title: language.localized(group.titleKey))
@@ -369,89 +395,6 @@ struct ClipboardHistoryView: View {
             .font(.system(size: 14, weight: .semibold))
             .foregroundStyle(.secondary)
             .textCase(nil)
-    }
-
-    private func historyRow(_ entry: ClipboardEntry) -> some View {
-        HStack(spacing: 12) {
-            rowLeadingIcon(for: entry)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(entry.preview)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-
-                if let appName = entry.sourceAppName {
-                    Text(appName)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-
-            Spacer(minLength: 8)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(rowBackground(for: entry))
-        .listRowInsets(EdgeInsets(top: 2, leading: 6, bottom: 2, trailing: 6))
-        .listRowBackground(Color.clear)
-        .contextMenu {
-            Button(language.localized("clipboard.action.paste")) {
-                pasteEntry(entry)
-            }
-        }
-        .onTapGesture {
-            selectionChangeSource = .pointer
-            uiState.selectedEntryID = entry.id
-        }
-        .simultaneousGesture(
-            TapGesture(count: 2).onEnded {
-                pasteEntry(entry)
-            }
-        )
-        .onHover { hovering in
-            if hovering {
-                hoveredEntryID = entry.id
-            } else if hoveredEntryID == entry.id {
-                hoveredEntryID = nil
-            }
-        }
-        .listRowSeparator(.hidden)
-    }
-
-    private func rowLeadingIcon(for entry: ClipboardEntry) -> some View {
-        ZStack {
-            if entry.type == .image,
-               let thumbnail = ClipboardImageCache.shared.thumbnailImage(for: entry.id, data: entry.thumbnailData) {
-                Image(nsImage: thumbnail)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: 32, height: 32)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            } else {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.primary.opacity(0.05))
-                    .frame(width: 32, height: 32)
-
-                Image(systemName: entry.iconName)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .frame(width: 32, height: 32)
-    }
-
-    private func rowBackground(for entry: ClipboardEntry) -> some View {
-        let isSelected = uiState.selectedEntryID == entry.id
-        let isHovered = hoveredEntryID == entry.id
-
-        return RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .fill(isSelected ? Color.accentColor : (isHovered ? Color.primary.opacity(0.05) : Color.clear))
-            .padding(.horizontal, 4)
-            .opacity(isSelected ? 1.0 : 1.0)
     }
 
     private func detailPreview(_ entry: ClipboardEntry) -> some View {
@@ -619,26 +562,45 @@ struct ClipboardHistoryView: View {
         uiState.updateSelectionIfNeeded(in: filteredEntries)
     }
 
-    private func ensureSelectedEntryVisibleInLoadedEntries() {
-        guard let selectedEntryID = uiState.selectedEntryID,
-              let selectedIndex = filteredEntries.firstIndex(where: { $0.id == selectedEntryID }) else {
-            return
-        }
+    /// 重新计算全部派生数据（filtered → loadedEntryCount → visible/grouped/displayed）
+    /// 在 entries / searchText / filter 变化，或首次出现时调用
+    private func rebuildDerivedState() {
+        let filtered = uiState.filteredEntries(from: history.entries)
+        filteredCache = filtered
 
-        loadedEntryCount = min(filteredEntries.count, max(loadedEntryCount, selectedIndex + 1))
+        // clamp loadedEntryCount 到 [initialLoadCount, filtered.count]，并确保选中项在 loaded 范围内
+        var newLoadedCount = min(max(loadedEntryCount, Self.initialLoadCount), filtered.count)
+        if let selectedEntryID = uiState.selectedEntryID,
+           let selectedIndex = filtered.firstIndex(where: { $0.id == selectedEntryID }) {
+            newLoadedCount = min(filtered.count, max(newLoadedCount, selectedIndex + 1))
+        }
+        loadedEntryCount = newLoadedCount
+
+        rebuildVisibleAndGroupedOnly()
+
+        updateSelectionIfNeeded()
     }
 
-    private func clampVisibleEntriesToFilteredCount() {
-        loadedEntryCount = min(max(loadedEntryCount, Self.initialLoadCount), filteredEntries.count)
+    /// 仅重建 visible/grouped/displayed（filtered 不变，loadedEntryCount 变化时调用）
+    private func rebuildVisibleAndGroupedOnly() {
+        guard let filtered = filteredCache else { return }
+        let visible = Array(filtered.prefix(loadedEntryCount))
+        visibleCache = visible
+        let grouped = groupedEntries(from: visible)
+        groupedCache = grouped
+        displayedCache = grouped.flatMap { $0.entries }
     }
 
     private func loadMoreIfNeeded(currentEntry: ClipboardEntry) {
-        guard let currentIndex = visibleEntries.firstIndex(where: { $0.id == currentEntry.id }) else { return }
-        let thresholdIndex = max(0, visibleEntries.count - Self.loadMoreTriggerDistance)
+        let visible = visibleEntries
+        guard let currentIndex = visible.firstIndex(where: { $0.id == currentEntry.id }) else { return }
+        let thresholdIndex = max(0, visible.count - Self.loadMoreTriggerDistance)
         guard currentIndex >= thresholdIndex else { return }
-        guard loadedEntryCount < filteredEntries.count else { return }
 
-        loadedEntryCount = min(loadedEntryCount + Self.loadMoreBatchCount, filteredEntries.count)
+        let filteredCount = filteredEntries.count
+        guard loadedEntryCount < filteredCount else { return }
+
+        loadedEntryCount = min(loadedEntryCount + Self.loadMoreBatchCount, filteredCount)
     }
 
     private func scrollToSelectedEntry(proxy: ScrollViewProxy, animated: Bool) {
@@ -734,6 +696,98 @@ struct ClipboardHistoryView: View {
         )
     }
 
+}
+
+/// 剪贴板历史列表行视图
+///
+/// hover 状态局部化为本 View 的 @State，避免鼠标经过行时修改父 View 状态、
+/// 进而打断整个 ClipboardHistoryView 的 body（这是滚动卡顿的主要元凶）。
+private struct ClipboardHistoryRow: View {
+    let entry: ClipboardEntry
+    let isSelected: Bool
+    let pasteActionTitle: String
+    let onTap: () -> Void
+    let onPaste: () -> Void
+    let onAppear: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            leadingIcon
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.preview)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+
+                if let appName = entry.sourceAppName {
+                    Text(appName)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer(minLength: 8)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(rowBackground)
+        .listRowInsets(EdgeInsets(top: 2, leading: 6, bottom: 2, trailing: 6))
+        .listRowBackground(Color.clear)
+        .contextMenu {
+            Button(pasteActionTitle) {
+                onPaste()
+            }
+        }
+        .onTapGesture {
+            onTap()
+        }
+        .simultaneousGesture(
+            TapGesture(count: 2).onEnded {
+                onPaste()
+            }
+        )
+        .onHover { hovering in
+            isHovered = hovering
+        }
+        .onAppear {
+            onAppear()
+        }
+        .listRowSeparator(.hidden)
+    }
+
+    private var leadingIcon: some View {
+        ZStack {
+            if entry.type == .image,
+               let thumbnail = ClipboardImageCache.shared.thumbnailImage(for: entry.id, data: entry.thumbnailData) {
+                Image(nsImage: thumbnail)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 32, height: 32)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            } else {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.primary.opacity(0.05))
+                    .frame(width: 32, height: 32)
+
+                Image(systemName: entry.iconName)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: 32, height: 32)
+    }
+
+    private var rowBackground: some View {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(isSelected ? Color.accentColor : (isHovered ? Color.primary.opacity(0.05) : Color.clear))
+            .padding(.horizontal, 4)
+    }
 }
 
 @MainActor
@@ -987,7 +1041,17 @@ private struct SelectableTextView: NSViewRepresentable {
     let font: NSFont
 
     func makeNSView(context: Context) -> NSScrollView {
-        let textView = NSTextView()
+        // 使用标准的 scrollableTextView 工厂方法创建,确保 textView 的 maxSize / autoresizingMask /
+        // widthTracksTextView 配置正确。若用 NSTextView() 默认初始化,textView 初始 frame 为 .zero 且
+        // 缺少 autoresizingMask,会导致 textContainer 宽度为 0,文本无法布局和绘制(右侧详情预览区空白)。
+        let scrollView = NSTextView.scrollableTextView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.drawsBackground = false
+        scrollView.scrollerStyle = .overlay
+        scrollView.autohidesScrollers = true
+
+        guard let textView = scrollView.documentView as? NSTextView else { return scrollView }
         textView.isEditable = false
         textView.isSelectable = true
         textView.drawsBackground = false
@@ -995,18 +1059,8 @@ private struct SelectableTextView: NSViewRepresentable {
         textView.textColor = .labelColor
         textView.textContainerInset = .zero
         textView.textContainer?.lineFragmentPadding = 0
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.textContainer?.widthTracksTextView = true
         textView.isAutomaticLinkDetectionEnabled = false
-
-        let scrollView = NSScrollView()
-        scrollView.documentView = textView
-        scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = false
-        scrollView.drawsBackground = false
-        scrollView.scrollerStyle = .overlay
-        scrollView.autohidesScrollers = true
+        textView.string = text
         return scrollView
     }
 
